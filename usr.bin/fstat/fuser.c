@@ -37,6 +37,7 @@
 #include <err.h>
 #include <fcntl.h>
 #include <libprocstat.h>
+#include <libxo/xo.h>
 #include <limits.h>
 #include <paths.h>
 #include <pwd.h>
@@ -48,6 +49,7 @@
 
 #include "functions.h"
 
+#define FUSER_XO_VERSION "1"
 /*
  * File access mode flags table.
  */
@@ -115,8 +117,7 @@ static void	dofiles(struct procstat *procstat, struct kinfo_proc *kp,
 static void
 usage(void)
 {
-
-	fprintf(stderr,
+	xo_error(
 "usage: fuser [-cfhkmu] [-M core] [-N system] [-s signal] file ...\n");
 	exit(EX_USAGE);
 }
@@ -125,14 +126,26 @@ static void
 printflags(struct consumer *cons)
 {
 	unsigned int i;
+	char flagbuf[NUFLAGS + NFFLAGS + 1];
+	int pos;
 
 	assert(cons);
+	pos = 0;
 	for (i = 0; i < NUFLAGS; i++)
 		if ((cons->uflags & uflags[i].flag) != 0)
-			fputc(uflags[i].ch, stderr);
+			flagbuf[pos++] = uflags[i].ch;
 	for (i = 0; i < NFFLAGS; i++)
 		if ((cons->flags & fflags[i].flag) != 0)
-			fputc(fflags[i].ch, stderr);
+			flagbuf[pos++] = fflags[i].ch;
+	flagbuf[pos] = '\0';
+
+	if (pos > 0) {
+		if (xo_get_style(NULL) == XO_STYLE_TEXT) {
+			fprintf(stderr, "%s", flagbuf);
+		} else {
+			xo_emit("{:flags/%s}", flagbuf);
+		}
+	}
 }
 
 /*
@@ -145,7 +158,7 @@ addfile(const char *path, struct reqfile *reqfile)
 
 	assert(path);
 	if (stat(path, &sb) != 0) {
-		warn("%s", path);
+		xo_warn("%s", path);
 		return (1);
 	}
 	reqfile->fileid = sb.st_ino;
@@ -165,6 +178,10 @@ do_fuser(int argc, char *argv[])
 	char *nlistf, *memf;
 	int ch, sig;
 	unsigned int i, cnt, nfiles;
+
+	argc = xo_parse_args(argc, argv);
+	if (argc < 0)
+		exit(1);
 
 	sig = SIGKILL;	/* Default to kill. */
 	nlistf = NULL;
@@ -198,7 +215,7 @@ do_fuser(int argc, char *argv[])
 			break;
 		case 's':
 			if (str2sig(optarg, &sig) != 0)
-				errx(EX_USAGE, "invalid signal: %s", optarg);
+				xo_errx(EX_USAGE, "invalid signal: %s", optarg);
 			break;
 		case 'h':
 			/* PASSTHROUGH */
@@ -219,24 +236,28 @@ do_fuser(int argc, char *argv[])
 	 */
 	reqfiles = malloc(argc * sizeof(struct reqfile));
 	if (reqfiles == NULL)
-		err(EX_OSERR, "malloc()");
+		xo_err(EX_OSERR, "malloc()");
 	nfiles = 0;
 	while (argc--)
 		if (!addfile(*(argv++), &reqfiles[nfiles]))
 			nfiles++;
 	if (nfiles == 0)
-		errx(EX_IOERR, "files not accessible");
+		xo_errx(EX_IOERR, "files not accessible");
 
 	if (memf != NULL)
 		procstat = procstat_open_kvm(nlistf, memf);
 	else
 		procstat = procstat_open_sysctl();
 	if (procstat == NULL)
-		errx(1, "procstat_open()");
+		xo_errx(1, "procstat_open()");
 	procs = procstat_getprocs(procstat, KERN_PROC_PROC, 0, &cnt);
 	if (procs == NULL)
-		 errx(1, "procstat_getprocs()");
+		 xo_errx(1, "procstat_getprocs()");
 
+	xo_set_version(FUSER_XO_VERSION);
+
+	xo_open_container("fuser-information");
+	xo_open_list("files");
 	/*
 	 * Walk through process table and look for matching files.
 	 */
@@ -245,26 +266,51 @@ do_fuser(int argc, char *argv[])
 			dofiles(procstat, &procs[i], reqfiles, nfiles);
 
 	for (i = 0; i < nfiles; i++) {
-		fprintf(stderr, "%s:", reqfiles[i].name);
-		fflush(stderr);
+		xo_open_instance("file");
+
+		if (xo_get_style(NULL) == XO_STYLE_TEXT) {
+			fprintf(stderr, "%s:", reqfiles[i].name);
+			fflush(stderr);
+		} else {
+			xo_emit("{:filename/%s}", reqfiles[i].name);
+		}
+
+		xo_open_list("consumers");
 		STAILQ_FOREACH(consumer, &reqfiles[i].consumers, next) {
 			if (consumer->flags != 0) {
-				fprintf(stdout, "%6d", consumer->pid);
-				fflush(stdout);
+				xo_open_instance("consumer");
+				xo_emit("{:pid/%6d/%d}", consumer->pid);
 				printflags(consumer);
-				if ((flags & UFLAG) != 0)
-					fprintf(stderr, "(%s)",
-					    user_from_uid(consumer->uid, 0));
+				if ((flags & UFLAG) != 0){
+					const char *username = user_from_uid(consumer->uid, 0);
+					if (xo_get_style(NULL) == XO_STYLE_TEXT) {
+						fprintf(stderr, "(%s)", username);
+					} else {
+						xo_emit("{:username/%s}", username);
+					}
+				}
 				if ((flags & KFLAG) != 0)
 					kill(consumer->pid, sig);
-				fflush(stderr);
+				if (xo_get_style(NULL) == XO_STYLE_TEXT)
+					fflush(stderr);
+				xo_close_instance("consumer");
 			}
 		}
-		(void)fprintf(stderr, "\n");
+		xo_close_list("consumers");
+		if (xo_get_style(NULL) == XO_STYLE_TEXT) {
+			fprintf(stderr, "\n");
+		}
+		xo_close_instance("file");
 	}
+	xo_close_list("files");
+	xo_close_container("fuser-information");
+
 	procstat_freeprocs(procstat, procs);
 	procstat_close(procstat);
 	free(reqfiles);
+	
+	if(xo_finish() < 0)
+		xo_err(1, "stdout");
 	return (0);
 }
 
@@ -325,7 +371,7 @@ dofiles(struct procstat *procstat, struct kinfo_proc *kp,
 			 */
 			cons = calloc(1, sizeof(struct consumer));
 			if (cons == NULL) {
-				warn("malloc()");
+				xo_warn("malloc()");
 				continue;
 			}
 			cons->uid = kp->ki_uid;
