@@ -358,7 +358,7 @@ print_file_info(struct procstat *procstat, struct filestat *fst,
 				fst->fs_type, fst->fs_fd, pid);
 	}
 	if (filename && !fsflg)
-		xo_emit("  {:filename/%s}", filename);
+		xo_emit("  {:filename/ %s}", filename);
 	xo_emit("\n");
 }
 
