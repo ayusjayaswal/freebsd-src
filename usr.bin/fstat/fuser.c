@@ -279,7 +279,12 @@ do_fuser(int argc, char *argv[])
 		STAILQ_FOREACH(consumer, &reqfiles[i].consumers, next) {
 			if (consumer->flags != 0) {
 				xo_open_instance("consumer");
-				xo_emit("{:pid/%6d/%d}", consumer->pid);
+				if (xo_get_style(NULL) == XO_STYLE_TEXT) {
+					fprintf(stdout, "%6d", consumer->pid);
+					fflush(stdout);
+				} else {
+					xo_emit("{:pid/%d}", consumer->pid);
+				}
 				printflags(consumer);
 				if ((flags & UFLAG) != 0){
 					const char *username = user_from_uid(consumer->uid, 0);
